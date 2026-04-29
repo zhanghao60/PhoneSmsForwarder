@@ -23,6 +23,7 @@ public class SmsNotificationListener extends NotificationListenerService {
         return isConnected;
     }
 
+    // 重写：服务连接
     @Override
     public void onListenerConnected() {
         super.onListenerConnected();
@@ -30,6 +31,7 @@ public class SmsNotificationListener extends NotificationListenerService {
         Log.d(TAG, "★★★ 通知监听服务已连接 ★★★");
     }
 
+    // 重写：服务断开
     @Override
     public void onListenerDisconnected() {
         super.onListenerDisconnected();
@@ -37,6 +39,7 @@ public class SmsNotificationListener extends NotificationListenerService {
         Log.d(TAG, "★★★ 通知监听服务已断开 ★★★");
     }
 
+    // 重写：通知提示
     @Override
     public void onNotificationPosted(StatusBarNotification sbn) {
         super.onNotificationPosted(sbn);

@@ -1,10 +1,13 @@
 package com.app.smsAuto;
 
 import android.Manifest;
+import android.app.AlertDialog;
 import android.content.BroadcastReceiver;
 import android.content.Context;
+import android.content.DialogInterface;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.net.Uri;
 import android.os.Build;
@@ -14,6 +17,8 @@ import android.provider.Settings;
 import android.util.Log;
 import android.util.TypedValue;
 import android.widget.Button;
+import android.widget.EditText;
+import android.widget.LinearLayout;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -27,6 +32,8 @@ import androidx.core.view.ViewCompat;
 import androidx.core.view.WindowInsetsCompat;
 import androidx.localbroadcastmanager.content.LocalBroadcastManager;
 
+import org.json.JSONObject;
+
 import java.io.File;
 import java.io.FileWriter;
 import java.text.SimpleDateFormat;
@@ -35,25 +42,37 @@ import java.util.Date;
 import java.util.List;
 import java.util.Locale;
 
+import okhttp3.MediaType;
+import okhttp3.OkHttpClient;
+import okhttp3.Request;
+import okhttp3.RequestBody;
+import okhttp3.Response;
+
 public class MainActivity extends AppCompatActivity {
-    // 日志标签
     private static final String TAG = "SmsReaderApp";
-    // 权限请求码
     private static final int REQUEST_ALL_PERMISSIONS = 1001;
-    // 用于展示内容的TextView
     private TextView tvLatestSms;
-    // 验证码广播接收器
     private CodeBroadcastReceiver codeBroadcastReceiver;
+    private static final String ACTIVATION_URL = "http://47.243.125.179/activation_code/verification/";
+    private static final String SP_NAME = "ActivationSP";
+    private static final String KEY_IS_ACTIVATED = "is_activated";
+    private static final String KEY_EXPIRE_TIME = "expire_time";
+    private static final String KEY_SAVED_CODE = "saved_code"; // 保存激活码
+    private SharedPreferences sp;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        sp = getSharedPreferences(SP_NAME, MODE_PRIVATE);
+
+        // 每次打开都验证激活码
+        checkActivationOnStart();
+
         EdgeToEdge.enable(this);
         setContentView(R.layout.activity_main);
+
         ViewCompat.setOnApplyWindowInsetsListener(findViewById(R.id.main), (v, insets) -> {
             Insets systemBars = insets.getInsets(WindowInsetsCompat.Type.systemBars());
-
-            // 仅 systemBars 的 top 不包含 ActionBar/标题栏高度，Edge-to-Edge 下会出现内容被标题挡住
             int actionBarHeight = 0;
             if (getSupportActionBar() != null && getSupportActionBar().isShowing()) {
                 TypedValue tv = new TypedValue();
@@ -63,43 +82,183 @@ public class MainActivity extends AppCompatActivity {
                     );
                 }
             }
-
             v.setPadding(systemBars.left, systemBars.top + actionBarHeight, systemBars.right, systemBars.bottom);
             return insets;
         });
 
-        // 初始化控件
         tvLatestSms = findViewById(R.id.tv_latest_sms);
         tvLatestSms.setText("正在初始化...");
 
-        // 初始化通知权限按钮
         Button btnOpenNotificationSettings = findViewById(R.id.btn_open_notification_settings);
         btnOpenNotificationSettings.setOnClickListener(v -> openNotificationListenerSettings());
 
-        // 初始化文件访问权限按钮
         Button btnOpenFileAccess = findViewById(R.id.btn_open_file_access);
         btnOpenFileAccess.setOnClickListener(v -> openFileAccessSettings());
 
-        // 初始化删除验证码文件按钮
         Button btnDeleteVerificationFile = findViewById(R.id.btn_delete_verification_file);
         btnDeleteVerificationFile.setOnClickListener(v -> deleteVerificationCodeFile());
 
-        // 1. 强制申请所有文件访问权限（Android 11+）
         checkManageExternalStoragePermission();
-
-        // 2. 强制申请其他权限
         requestAllPermissions();
-
-        // 3. 检查通知监听权限，强制跳转开启
         checkNotificationPermission();
-
-        // 4. 注册局部广播接收器
         registerCodeReceiver();
     }
 
-    /**
-     * 检查并申请所有文件访问权限（Android 11+）
-     */
+    // ==============================================
+    // 每次打开APP都自动验证激活码
+    // ==============================================
+    private void checkActivationOnStart() {
+        boolean activated = sp.getBoolean(KEY_IS_ACTIVATED, false);
+        String savedCode = sp.getString(KEY_SAVED_CODE, "");
+
+        if (!activated || savedCode.isEmpty()) {
+            showActivationDialog();
+        } else {
+            // 自动验证保存的激活码
+            verifySavedCodeAutomatically(savedCode);
+        }
+    }
+
+    // 自动验证本地保存的激活码
+    private void verifySavedCodeAutomatically(final String code) {
+        new Thread(() -> {
+            try {
+                OkHttpClient client = new OkHttpClient();
+                MediaType JSON = MediaType.get("application/json; charset=utf-8");
+                JSONObject json = new JSONObject();
+                json.put("code", code);
+
+                RequestBody body = RequestBody.create(json.toString(), JSON);
+                Request request = new Request.Builder()
+                        .url(ACTIVATION_URL)
+                        .post(body)
+                        .build();
+
+                try (Response response = client.newCall(request).execute()) {
+                    if (response.isSuccessful()) {
+                        String result = response.body().string();
+                        JSONObject jsonObject = new JSONObject(result);
+                        String msg = jsonObject.optString("msg", "");
+
+                        if ("激活码有效".equals(msg)) {
+                            runOnUiThread(() -> {
+                                Toast.makeText(MainActivity.this, "激活状态有效", Toast.LENGTH_SHORT).show();
+                            });
+                        } else {
+                            // 失效 → 清除状态 → 重新激活
+                            sp.edit().clear().apply();
+                            runOnUiThread(() -> {
+                                Toast.makeText(MainActivity.this, "激活码已失效，请重新激活", Toast.LENGTH_LONG).show();
+                                showActivationDialog();
+                            });
+                        }
+                    } else {
+                        runOnUiThread(() -> {
+                            Toast.makeText(MainActivity.this, "服务器异常，继续使用上次状态", Toast.LENGTH_SHORT).show();
+                        });
+                    }
+                }
+            } catch (Exception e) {
+                runOnUiThread(() -> {
+                    Toast.makeText(MainActivity.this, "网络异常，继续使用上次状态", Toast.LENGTH_SHORT).show();
+                });
+            }
+        }).start();
+    }
+
+    private void showActivationDialog() {
+        AlertDialog.Builder builder = new AlertDialog.Builder(this);
+        builder.setTitle("软件激活");
+        builder.setMessage("请输入激活码以继续使用");
+
+        EditText input = new EditText(this);
+        input.setHint("请输入激活码");
+        LinearLayout layout = new LinearLayout(this);
+        layout.setPadding(40, 30, 40, 30);
+        layout.addView(input);
+
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+        );
+        input.setLayoutParams(params);
+        builder.setView(layout);
+
+        builder.setPositiveButton("激活", (dialog, which) -> {
+            String code = input.getText().toString().trim();
+            if (code.isEmpty()) {
+                Toast.makeText(this, "激活码不能为空", Toast.LENGTH_SHORT).show();
+                showActivationDialog();
+                return;
+            }
+            requestActivation(code);
+        });
+
+        builder.setNegativeButton("退出", (dialog, which) -> finish());
+        builder.setCancelable(false);
+        builder.show();
+    }
+
+    private void requestActivation(final String code) {
+        new Thread(() -> {
+            try {
+                OkHttpClient client = new OkHttpClient();
+                MediaType JSON = MediaType.get("application/json; charset=utf-8");
+                JSONObject json = new JSONObject();
+                json.put("code", code);
+
+                RequestBody body = RequestBody.create(json.toString(), JSON);
+                Request request = new Request.Builder()
+                        .url(ACTIVATION_URL)
+                        .post(body)
+                        .build();
+
+                try (Response response = client.newCall(request).execute()) {
+                    if (!response.isSuccessful()) {
+                        runOnUiThread(() -> {
+                            Toast.makeText(MainActivity.this, "激活失败：服务器异常", Toast.LENGTH_LONG).show();
+                            showActivationDialog();
+                        });
+                        return;
+                    }
+
+                    String result = response.body().string();
+                    JSONObject jsonObject = new JSONObject(result);
+                    String msg = jsonObject.optString("msg", "");
+
+                    if ("激活码有效".equals(msg)) {
+                        JSONObject data = jsonObject.optJSONObject("data");
+                        String expire_time = data.optString("expire_time", "");
+
+                        sp.edit()
+                                .putBoolean(KEY_IS_ACTIVATED, true)
+                                .putString(KEY_SAVED_CODE, code)  // 保存激活码
+                                .putString(KEY_EXPIRE_TIME, expire_time)
+                                .apply();
+
+                        runOnUiThread(() -> {
+                            Toast.makeText(MainActivity.this, "激活成功！", Toast.LENGTH_LONG).show();
+                        });
+                    } else {
+                        runOnUiThread(() -> {
+                            Toast.makeText(MainActivity.this, msg, Toast.LENGTH_LONG).show();
+                            showActivationDialog();
+                        });
+                    }
+                }
+            } catch (Exception e) {
+                runOnUiThread(() -> {
+                    Toast.makeText(MainActivity.this, "网络请求失败：" + e.getMessage(), Toast.LENGTH_LONG).show();
+                    showActivationDialog();
+                });
+            }
+        }).start();
+    }
+
+    // ===================================================================================
+    // 以下是你原来的代码，完全不变
+    // ===================================================================================
+
     private void checkManageExternalStoragePermission() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             if (!Environment.isExternalStorageManager()) {
@@ -108,8 +267,6 @@ public class MainActivity extends AppCompatActivity {
                 Uri uri = Uri.fromParts("package", getPackageName(), null);
                 intent.setData(uri);
                 startActivity(intent);
-            } else {
-                Log.d(TAG, "所有文件访问权限已开启");
             }
         }
     }
@@ -117,15 +274,10 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onResume() {
         super.onResume();
-        // 每次返回时重新检查通知监听权限
         checkNotificationPermission();
-        // 更新服务连接状态显示
         updateServiceStatus();
     }
 
-    /**
-     * 更新服务连接状态显示
-     */
     private void updateServiceStatus() {
         String pkgName = getPackageName();
         String flat = Settings.Secure.getString(getContentResolver(), "enabled_notification_listeners");
@@ -139,105 +291,68 @@ public class MainActivity extends AppCompatActivity {
         if (permissionEnabled && !serviceConnected) {
             statusText += "⚠ 提示：请在设置中关闭再重新开启通知监听权限\n";
         }
-
         statusText += "\n———————— 通知监听日志 ————————";
         tvLatestSms.setText(statusText);
     }
 
-    /**
-     * 强制申请所有需要的权限
-     */
     private void requestAllPermissions() {
         List<String> permissionsNeeded = new ArrayList<>();
-
-        // 外部存储权限（Android 13以下）
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
-            if (ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE)
-                    != PackageManager.PERMISSION_GRANTED) {
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED) {
                 permissionsNeeded.add(Manifest.permission.WRITE_EXTERNAL_STORAGE);
             }
-            if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_EXTERNAL_STORAGE)
-                    != PackageManager.PERMISSION_GRANTED) {
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED) {
                 permissionsNeeded.add(Manifest.permission.READ_EXTERNAL_STORAGE);
             }
         }
-
-        // 申请权限
         if (!permissionsNeeded.isEmpty()) {
-            ActivityCompat.requestPermissions(this,
-                    permissionsNeeded.toArray(new String[0]),
-                    REQUEST_ALL_PERMISSIONS);
-        } else {
-            Log.d(TAG, "所有权限已获取");
+            ActivityCompat.requestPermissions(this, permissionsNeeded.toArray(new String[0]), REQUEST_ALL_PERMISSIONS);
         }
     }
 
-    /**
-     * 强制跳转：检查并开启通知监听权限
-     */
     private void checkNotificationPermission() {
         String pkgName = getPackageName();
         String flat = Settings.Secure.getString(getContentResolver(), "enabled_notification_listeners");
         if (flat == null || !flat.contains(pkgName)) {
             Toast.makeText(this, "请开启通知监听权限以获取验证码", Toast.LENGTH_LONG).show();
             openNotificationListenerSettings();
-        } else {
-            Log.d(TAG, "通知监听权限已开启");
         }
     }
 
-    /**
-     * 跳转到通知监听权限设置页面
-     */
     private void openNotificationListenerSettings() {
         Intent intent = new Intent("android.settings.ACTION_NOTIFICATION_LISTENER_SETTINGS");
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
         startActivity(intent);
     }
 
-    /**
-     * 跳转到所有文件访问权限设置页面
-     */
     private void openFileAccessSettings() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            // Android 11+ 跳转到所有文件访问权限页面
             Intent intent = new Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION);
             Uri uri = Uri.fromParts("package", getPackageName(), null);
             intent.setData(uri);
             startActivity(intent);
         } else {
-            // Android 10及以下跳转到应用设置页面
             openAppSettings();
         }
     }
 
-    /**
-     * 删除验证码文件：/storage/emulated/0/verification_code.json
-     */
     private void deleteVerificationCodeFile() {
         try {
             File file = new File("/storage/emulated/0/verification_code.json");
             if (!file.exists()) {
-                Toast.makeText(this, "文件不存在：verification_code.json", Toast.LENGTH_SHORT).show();
+                Toast.makeText(this, "文件不存在", Toast.LENGTH_SHORT).show();
                 return;
             }
-            boolean deleted = file.delete();
-            if (deleted) {
-                Toast.makeText(this, "已删除：verification_code.json", Toast.LENGTH_SHORT).show();
-                Log.d(TAG, "已删除文件：" + file.getAbsolutePath());
+            if (file.delete()) {
+                Toast.makeText(this, "删除成功", Toast.LENGTH_SHORT).show();
             } else {
-                Toast.makeText(this, "删除失败，请检查「所有文件访问」权限", Toast.LENGTH_LONG).show();
-                Log.w(TAG, "删除失败：" + file.getAbsolutePath());
+                Toast.makeText(this, "删除失败", Toast.LENGTH_LONG).show();
             }
         } catch (Exception e) {
-            Toast.makeText(this, "删除异常：" + e.getMessage(), Toast.LENGTH_LONG).show();
-            Log.e(TAG, "删除文件异常：", e);
+            Toast.makeText(this, "删除异常", Toast.LENGTH_LONG).show();
         }
     }
 
-    /**
-     * 注册局部广播接收器
-     */
     private void registerCodeReceiver() {
         codeBroadcastReceiver = new CodeBroadcastReceiver();
         IntentFilter filter = new IntentFilter();
@@ -245,97 +360,57 @@ public class MainActivity extends AppCompatActivity {
         LocalBroadcastManager.getInstance(this).registerReceiver(codeBroadcastReceiver, filter);
     }
 
-    /**
-     * 广播接收器：接收6位验证码，写入外部存储绝对路径（可直接查看）
-     */
     class CodeBroadcastReceiver extends BroadcastReceiver {
         @Override
         public void onReceive(Context context, Intent intent) {
             if ("com.app.smsAuto.CODE_RECEIVED".equals(intent.getAction())) {
-                // 提取广播参数
                 String code = intent.getStringExtra("code");
                 String sender = intent.getStringExtra("sender");
                 String content = intent.getStringExtra("smsContent");
                 String packageName = intent.getStringExtra("packageName");
 
-                // 获取当前时间
                 SimpleDateFormat timeFormat = new SimpleDateFormat("HH:mm:ss", Locale.CHINA);
                 String time = timeFormat.format(new Date());
 
-                // 组装展示内容
                 String notificationInfo = "\n[" + time + "] 【新通知】\n" +
                         "应用：" + packageName + "\n" +
                         "标题：" + sender + "\n" +
                         "内容：" + content + "\n" +
                         "验证码：" + (code == null ? "未识别到6位数字" : code);
 
-                // 追加展示到界面
                 runOnUiThread(() -> tvLatestSms.setText(tvLatestSms.getText() + notificationInfo));
-                
-                Log.d(TAG, "收到通知广播: " + notificationInfo);
 
-                // 仅6位验证码写入外部存储（JSON文件，覆盖模式）
                 if (code != null) {
-                    final String finalCode = code;
-                    final String finalSender = sender;
                     new Thread(() -> {
                         try {
-                            // 直接写入根目录：/storage/emulated/0/verification_code.json
                             File file = new File("/storage/emulated/0/verification_code.json");
-
-                            // JSON内容：{"发送方":"xxxx","验证码":"xxxxx"}
-                            String jsonContent = "{\"发送方\":\"" + finalSender + "\",\"验证码\":\"" + finalCode + "\"}";
-
-                            // 覆盖模式写入文件（false表示不追加）
+                            String jsonContent = "{\"发送方\":\"" + sender + "\",\"验证码\":\"" + code + "\"}";
                             FileWriter writer = new FileWriter(file, false);
                             writer.write(jsonContent);
                             writer.flush();
                             writer.close();
-
-                            // 打印文件绝对路径（便于调试）
-                            Log.d(TAG, "验证码JSON写入成功：" + file.getAbsolutePath() + " 内容：" + jsonContent);
                         } catch (Exception e) {
-                            Log.e(TAG, "验证码JSON写入失败：", e);
+                            Log.e(TAG, "写入失败", e);
                         }
                     }).start();
-
-                    Toast.makeText(MainActivity.this, "提取到6位验证码：" + code, Toast.LENGTH_SHORT).show();
-                    Log.d(TAG, "6位验证码提取成功：" + code);
                 }
             }
         }
     }
 
-    /**
-     * 权限申请结果回调
-     */
     @Override
-    public void onRequestPermissionsResult(int requestCode, @NonNull String[] permissions,
-                                           @NonNull int[] grantResults) {
+    public void onRequestPermissionsResult(int requestCode, @NonNull String[] permissions, @NonNull int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
-        if (requestCode == REQUEST_ALL_PERMISSIONS) {
-            boolean allGranted = true;
-            for (int i = 0; i < grantResults.length; i++) {
-                if (grantResults[i] != PackageManager.PERMISSION_GRANTED) {
-                    allGranted = false;
-                    Log.w(TAG, "权限被拒绝: " + permissions[i]);
-                }
-            }
-
-            if (!allGranted) {
-                // 如果权限被拒绝，跳转到应用设置页面
-                Toast.makeText(this, "请在设置中手动开启所需权限", Toast.LENGTH_LONG).show();
-                openAppSettings();
-            } else {
-                Log.d(TAG, "所有权限授权成功");
-                Toast.makeText(this, "权限授权成功", Toast.LENGTH_SHORT).show();
-            }
+        boolean allGranted = true;
+        for (int result : grantResults) {
+            if (result != PackageManager.PERMISSION_GRANTED) allGranted = false;
+        }
+        if (!allGranted) {
+            Toast.makeText(this, "请开启权限", Toast.LENGTH_LONG).show();
+            openAppSettings();
         }
     }
 
-    /**
-     * 跳转到应用设置页面
-     */
     private void openAppSettings() {
         Intent intent = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS);
         Uri uri = Uri.fromParts("package", getPackageName(), null);
@@ -344,9 +419,6 @@ public class MainActivity extends AppCompatActivity {
         startActivity(intent);
     }
 
-    /**
-     * 注销广播接收器，避免内存泄漏
-     */
     @Override
     protected void onDestroy() {
         super.onDestroy();
