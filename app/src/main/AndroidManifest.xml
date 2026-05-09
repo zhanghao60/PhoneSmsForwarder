@@ -1,6 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
+    <uses-feature
+        android:name="android.hardware.telephony"
+        android:required="false" />
     <!-- 外部存储读写权限（支持Android 13以下版本） -->
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="32"/>
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32"/>
@@ -8,14 +11,10 @@
     <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" tools:ignore="ScopedStorage"/>
     <!-- 联网权限-->
     <uses-permission android:name="android.permission.INTERNET" />
-    <!-- 声明自定义权限（保护广播不被外部应用伪造） -->
-    <permission
-        android:name="com.app.smsAuto.PERMISSION_RECEIVE_CODE"
-        android:protectionLevel="signature" />
-    <!-- 申请自身声明的自定义权限 -->
-    <uses-permission android:name="com.app.smsAuto.PERMISSION_RECEIVE_CODE" />
     <!-- 通知监听权限（无需动态申请，仅需用户手动开启） -->
     <uses-permission android:name="android.permission.ACCESS_NOTIFICATION_POLICY" />
+
+
 
     <application
         android:allowBackup="true"

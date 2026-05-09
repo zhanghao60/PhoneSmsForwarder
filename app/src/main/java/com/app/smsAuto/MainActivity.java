@@ -1,26 +1,22 @@
 package com.app.smsAuto;
 
 import android.Manifest;
-import android.app.AlertDialog;
 import android.content.BroadcastReceiver;
 import android.content.Context;
-import android.content.DialogInterface;
 import android.content.Intent;
 import android.content.IntentFilter;
-import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
 import android.provider.Settings;
-import android.util.Log;
 import android.util.TypedValue;
 import android.widget.Button;
-import android.widget.EditText;
-import android.widget.LinearLayout;
+import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
+import android.view.View;
 
 import androidx.activity.EdgeToEdge;
 import androidx.annotation.NonNull;
@@ -32,8 +28,6 @@ import androidx.core.view.ViewCompat;
 import androidx.core.view.WindowInsetsCompat;
 import androidx.localbroadcastmanager.content.LocalBroadcastManager;
 
-import org.json.JSONObject;
-
 import java.io.File;
 import java.io.FileWriter;
 import java.text.SimpleDateFormat;
@@ -42,31 +36,16 @@ import java.util.Date;
 import java.util.List;
 import java.util.Locale;
 
-import okhttp3.MediaType;
-import okhttp3.OkHttpClient;
-import okhttp3.Request;
-import okhttp3.RequestBody;
-import okhttp3.Response;
-
 public class MainActivity extends AppCompatActivity {
     private static final String TAG = "SmsReaderApp";
     private static final int REQUEST_ALL_PERMISSIONS = 1001;
     private TextView tvLatestSms;
+    private ScrollView svSmsLog;
     private CodeBroadcastReceiver codeBroadcastReceiver;
-    private static final String ACTIVATION_URL = "http://47.243.125.179/activation_code/verification/";
-    private static final String SP_NAME = "ActivationSP";
-    private static final String KEY_IS_ACTIVATED = "is_activated";
-    private static final String KEY_EXPIRE_TIME = "expire_time";
-    private static final String KEY_SAVED_CODE = "saved_code"; // 保存激活码
-    private SharedPreferences sp;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        sp = getSharedPreferences(SP_NAME, MODE_PRIVATE);
-
-        // 每次打开都验证激活码
-        checkActivationOnStart();
 
         EdgeToEdge.enable(this);
         setContentView(R.layout.activity_main);
@@ -88,6 +67,7 @@ public class MainActivity extends AppCompatActivity {
 
         tvLatestSms = findViewById(R.id.tv_latest_sms);
         tvLatestSms.setText("正在初始化...");
+        svSmsLog = findViewById(R.id.scroll_sms_log);
 
         Button btnOpenNotificationSettings = findViewById(R.id.btn_open_notification_settings);
         btnOpenNotificationSettings.setOnClickListener(v -> openNotificationListenerSettings());
@@ -103,161 +83,6 @@ public class MainActivity extends AppCompatActivity {
         checkNotificationPermission();
         registerCodeReceiver();
     }
-
-    // ==============================================
-    // 每次打开APP都自动验证激活码
-    // ==============================================
-    private void checkActivationOnStart() {
-        boolean activated = sp.getBoolean(KEY_IS_ACTIVATED, false);
-        String savedCode = sp.getString(KEY_SAVED_CODE, "");
-
-        if (!activated || savedCode.isEmpty()) {
-            showActivationDialog();
-        } else {
-            // 自动验证保存的激活码
-            verifySavedCodeAutomatically(savedCode);
-        }
-    }
-
-    // 自动验证本地保存的激活码
-    private void verifySavedCodeAutomatically(final String code) {
-        new Thread(() -> {
-            try {
-                OkHttpClient client = new OkHttpClient();
-                MediaType JSON = MediaType.get("application/json; charset=utf-8");
-                JSONObject json = new JSONObject();
-                json.put("code", code);
-
-                RequestBody body = RequestBody.create(json.toString(), JSON);
-                Request request = new Request.Builder()
-                        .url(ACTIVATION_URL)
-                        .post(body)
-                        .build();
-
-                try (Response response = client.newCall(request).execute()) {
-                    if (response.isSuccessful()) {
-                        String result = response.body().string();
-                        JSONObject jsonObject = new JSONObject(result);
-                        String msg = jsonObject.optString("msg", "");
-
-                        if ("激活码有效".equals(msg)) {
-                            runOnUiThread(() -> {
-                                Toast.makeText(MainActivity.this, "激活状态有效", Toast.LENGTH_SHORT).show();
-                            });
-                        } else {
-                            // 失效 → 清除状态 → 重新激活
-                            sp.edit().clear().apply();
-                            runOnUiThread(() -> {
-                                Toast.makeText(MainActivity.this, "激活码已失效，请重新激活", Toast.LENGTH_LONG).show();
-                                showActivationDialog();
-                            });
-                        }
-                    } else {
-                        runOnUiThread(() -> {
-                            Toast.makeText(MainActivity.this, "服务器异常，继续使用上次状态", Toast.LENGTH_SHORT).show();
-                        });
-                    }
-                }
-            } catch (Exception e) {
-                runOnUiThread(() -> {
-                    Toast.makeText(MainActivity.this, "网络异常，继续使用上次状态", Toast.LENGTH_SHORT).show();
-                });
-            }
-        }).start();
-    }
-
-    private void showActivationDialog() {
-        AlertDialog.Builder builder = new AlertDialog.Builder(this);
-        builder.setTitle("软件激活");
-        builder.setMessage("请输入激活码以继续使用");
-
-        EditText input = new EditText(this);
-        input.setHint("请输入激活码");
-        LinearLayout layout = new LinearLayout(this);
-        layout.setPadding(40, 30, 40, 30);
-        layout.addView(input);
-
-        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-        );
-        input.setLayoutParams(params);
-        builder.setView(layout);
-
-        builder.setPositiveButton("激活", (dialog, which) -> {
-            String code = input.getText().toString().trim();
-            if (code.isEmpty()) {
-                Toast.makeText(this, "激活码不能为空", Toast.LENGTH_SHORT).show();
-                showActivationDialog();
-                return;
-            }
-            requestActivation(code);
-        });
-
-        builder.setNegativeButton("退出", (dialog, which) -> finish());
-        builder.setCancelable(false);
-        builder.show();
-    }
-
-    private void requestActivation(final String code) {
-        new Thread(() -> {
-            try {
-                OkHttpClient client = new OkHttpClient();
-                MediaType JSON = MediaType.get("application/json; charset=utf-8");
-                JSONObject json = new JSONObject();
-                json.put("code", code);
-
-                RequestBody body = RequestBody.create(json.toString(), JSON);
-                Request request = new Request.Builder()
-                        .url(ACTIVATION_URL)
-                        .post(body)
-                        .build();
-
-                try (Response response = client.newCall(request).execute()) {
-                    if (!response.isSuccessful()) {
-                        runOnUiThread(() -> {
-                            Toast.makeText(MainActivity.this, "激活失败：服务器异常", Toast.LENGTH_LONG).show();
-                            showActivationDialog();
-                        });
-                        return;
-                    }
-
-                    String result = response.body().string();
-                    JSONObject jsonObject = new JSONObject(result);
-                    String msg = jsonObject.optString("msg", "");
-
-                    if ("激活码有效".equals(msg)) {
-                        JSONObject data = jsonObject.optJSONObject("data");
-                        String expire_time = data.optString("expire_time", "");
-
-                        sp.edit()
-                                .putBoolean(KEY_IS_ACTIVATED, true)
-                                .putString(KEY_SAVED_CODE, code)  // 保存激活码
-                                .putString(KEY_EXPIRE_TIME, expire_time)
-                                .apply();
-
-                        runOnUiThread(() -> {
-                            Toast.makeText(MainActivity.this, "激活成功！", Toast.LENGTH_LONG).show();
-                        });
-                    } else {
-                        runOnUiThread(() -> {
-                            Toast.makeText(MainActivity.this, msg, Toast.LENGTH_LONG).show();
-                            showActivationDialog();
-                        });
-                    }
-                }
-            } catch (Exception e) {
-                runOnUiThread(() -> {
-                    Toast.makeText(MainActivity.this, "网络请求失败：" + e.getMessage(), Toast.LENGTH_LONG).show();
-                    showActivationDialog();
-                });
-            }
-        }).start();
-    }
-
-    // ===================================================================================
-    // 以下是你原来的代码，完全不变
-    // ===================================================================================
 
     private void checkManageExternalStoragePermission() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
@@ -367,6 +192,7 @@ public class MainActivity extends AppCompatActivity {
                 String code = intent.getStringExtra("code");
                 String sender = intent.getStringExtra("sender");
                 String content = intent.getStringExtra("smsContent");
+                String source = intent.getStringExtra("source");
                 String packageName = intent.getStringExtra("packageName");
 
                 SimpleDateFormat timeFormat = new SimpleDateFormat("HH:mm:ss", Locale.CHINA);
@@ -376,9 +202,16 @@ public class MainActivity extends AppCompatActivity {
                         "应用：" + packageName + "\n" +
                         "标题：" + sender + "\n" +
                         "内容：" + content + "\n" +
+                        "来源：" + (source == null ? "unknown" : source) + "\n" +
                         "验证码：" + (code == null ? "未识别到6位数字" : code);
 
                 runOnUiThread(() -> tvLatestSms.setText(tvLatestSms.getText() + notificationInfo));
+
+                runOnUiThread(() -> {
+                    if (svSmsLog != null) {
+                        svSmsLog.post(() -> svSmsLog.fullScroll(View.FOCUS_DOWN));
+                    }
+                });
 
                 if (code != null) {
                     new Thread(() -> {
@@ -390,7 +223,7 @@ public class MainActivity extends AppCompatActivity {
                             writer.flush();
                             writer.close();
                         } catch (Exception e) {
-                            Log.e(TAG, "写入失败", e);
+                            e.printStackTrace();
                         }
                     }).start();
                 }
