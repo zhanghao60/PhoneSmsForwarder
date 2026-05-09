@@ -52,7 +52,7 @@ public class SmsNotificationListener extends NotificationListenerService {
         Bundle extras = notification.extras;
         String title = extras.getString(Notification.EXTRA_TITLE, "未知标题");
 
-        String content = buildCandidateText(notification, extras);
+        String content = getText(notification, extras);
         if (content == null || content.trim().isEmpty()) content = "无通知内容";
 
         String code = extractOtp(content);
@@ -76,19 +76,25 @@ public class SmsNotificationListener extends NotificationListenerService {
         super.onNotificationRemoved(sbn);
     }
 
-    private String buildCandidateText(Notification notification, Bundle extras) {
+    private String getText(Notification notification, Bundle extras) {
         if (extras == null) return "";
 
+        // HashSet 特点：自动去重，存过的内容不会再存第二次
         java.util.HashSet<String> seenLines = new java.util.HashSet<>();
+        // 字符串拼接工具，比直接用 + 效率高，专门用来拼接长文本
         StringBuilder sb = new StringBuilder();
 
+        // 读取标准通知里的普通文本
         appendIfNotEmptyDedup(sb, seenLines, extras.getCharSequence(Notification.EXTRA_TEXT));
+        // 读取标准通知里的大文本，展开后内容
         appendIfNotEmptyDedup(sb, seenLines, extras.getCharSequence(Notification.EXTRA_BIG_TEXT));
+        // 读取部分厂商/旧版系统用的自定义通知文本字段
         appendIfNotEmptyDedup(sb, seenLines, extras.getCharSequence("android.text"));
         appendIfNotEmptyDedup(sb, seenLines, extras.getCharSequence("android.bigText"));
         appendIfNotEmptyDedup(sb, seenLines, extras.getCharSequence("android.summaryText"));
         appendIfNotEmptyDedup(sb, seenLines, extras.getCharSequence("android.subText"));
 
+        // 读取通知里的消息列表（android.messages 是系统消息样式固定字段）
         try {
             java.util.ArrayList<?> messages = extras.getParcelableArrayList("android.messages");
             if (messages != null && !messages.isEmpty()) {
@@ -114,6 +120,7 @@ public class SmsNotificationListener extends NotificationListenerService {
             Log.e(TAG, "解析失败", e);
         }
 
+        // 遍历通知里所有的键值对
         try {
             for (String key : extras.keySet()) {
                 Object v = extras.get(key);
